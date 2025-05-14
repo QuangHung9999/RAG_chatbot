@@ -4,11 +4,19 @@ Streamlit app to interact with OpenAI GPT-4o, with text, images and audio (using
 
 ---
 
-To run the app locally:
+## Require: python 3.12
 
-git clone it
+`PATH-TO-PYTHON-312 -m venv <name_of_your_environment>`
+
+`.venv\Scripts\Activate.ps1`
+
+## To run the app locally:
 
 `pip install -r requirements.txt`
+
+or
+
+`pip install -r requirements.txt --no-cache-dir`
 
 `streamlit run app.py`
 
@@ -23,7 +31,7 @@ project_root/  # This is "python_ai_chat" directory
 ├── documents/           # Store PDFs here
 │   └── source_document.pdf
 ├── vector_store_data/   #For FAISS index etc.
-├── Dockerfile        
+├── Dockerfile  
 ├── docker-compose.yml 
 ├── requirements.txt
 └── .env

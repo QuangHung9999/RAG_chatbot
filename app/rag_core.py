@@ -61,6 +61,16 @@ def _load_and_split_pdfs(pdf_paths):
                 # Each 'document' from PyPDFLoader is a page, split each page
                 chunks_from_pdf = text_splitter.split_documents(documents)
                 all_document_chunks.extend(chunks_from_pdf)
+                
+                # if os.path.basename(doc_path) == "Company-10k-18pages.pdf":
+                #     print(f"DEBUG: Chunks for {os.path.basename(doc_path)} page 0:")
+                #     for i, chunk_doc in enumerate(chunks_from_pdf):
+                #         if chunk_doc.metadata.get('page') == 0: # Check if page metadata is 0
+                #             print(f"--- Chunk {i} (Page 0) ---")
+                #             print(chunk_doc.page_content[:500]) # Print first 500 chars
+                #             if i > 5: # Print a few chunks from page 0
+                #                 break 
+                
                 st.sidebar.write(f"Processed '{os.path.basename(doc_path)}': {len(chunks_from_pdf)} chunks total.")
                 print(f"DEBUG: Split {os.path.basename(doc_path)} into {len(chunks_from_pdf)} chunks.")
             except Exception as e:
@@ -210,11 +220,10 @@ def get_llm(api_key, model_name="gemini-1.5-flash", temperature=0.3):
 
 # TEMPORARILY MODIFIED PROMPT FOR DEBUGGING - Be slightly less strict
 RAG_PROMPT_TEMPLATE_STRING = """
-You are an AI assistant. Your main task is to answer questions based on the provided context documents.
-Please use the information from the 'Context' section below to answer the 'Question'.
-If the context seems relevant, try your best to form an answer.
-If the context clearly does not contain the information needed to answer the question, then state: "I'm sorry, I cannot answer this question based on the provided documents."
-Do not make up information or use external knowledge beyond the provided context.
+You are a helpful AI assistant.
+If relevant context from documents is provided below, please use it to answer the question.
+If the context does not help answer the question, or if no context is provided, please answer the question using your general knowledge.
+If you are using information from the provided documents, please indicate that.
 
 Context:
 {context}

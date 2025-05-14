@@ -207,7 +207,7 @@ def chatbot_page():
             st.rerun()
             
         retriever = st.session_state.vector_store.as_retriever(
-            search_type="similarity", search_kwargs={"k": 3}
+            search_type="similarity", search_kwargs={"k": 10}
         )
         
         print("DEBUG: Attempting to retrieve documents with retriever...")

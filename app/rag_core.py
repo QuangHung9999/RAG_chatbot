@@ -157,7 +157,7 @@ def add_documents_to_vector_store(uploaded_files, vector_store, embeddings_model
     os.makedirs(DOCUMENTS_DIR, exist_ok=True)
     for uploaded_file in uploaded_files:
         # Create a unique name for temporary files
-        temp_file_path = os.path.join(DOCUMENTS_DIR, f"uploaded_{uploaded_file.id}_{uploaded_file.name}")
+        temp_file_path = os.path.join(DOCUMENTS_DIR, f"uploaded_{uploaded_file.file_id}_{uploaded_file.name}")
         try:
             with open(temp_file_path, "wb") as f:
                 f.write(uploaded_file.getbuffer())

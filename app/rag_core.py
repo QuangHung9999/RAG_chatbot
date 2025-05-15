@@ -40,18 +40,17 @@ def get_embeddings_model():
 def _load_and_split_pdfs(pdf_paths):
     """Loads and splits multiple PDF documents into chunks."""
     all_document_chunks = []
-    print(f"DEBUG: _load_and_split_pdfs called with paths: {pdf_paths}")
+    print(f"DEBUG: _load_and_split_pdfs called with {len(pdf_paths)} paths")
     for doc_path in pdf_paths:
         if os.path.exists(doc_path):
             try:
-                print(f"DEBUG: Loading PDF: {doc_path}")
+                # Don't print every file path to reduce log spam
                 loader = PyPDFLoader(doc_path)
                 documents = loader.load() # PyPDFLoader loads page by page
                 if not documents:
                     st.warning(f"No content loaded from PDF: {os.path.basename(doc_path)}")
-                    print(f"DEBUG: No documents loaded from {doc_path}")
+                    print(f"DEBUG: No documents loaded from {os.path.basename(doc_path)}")
                     continue
-                print(f"DEBUG: Loaded {len(documents)} pages from {doc_path}")
                 
                 text_splitter = RecursiveCharacterTextSplitter(
                     chunk_size=1000, 
@@ -62,23 +61,14 @@ def _load_and_split_pdfs(pdf_paths):
                 chunks_from_pdf = text_splitter.split_documents(documents)
                 all_document_chunks.extend(chunks_from_pdf)
                 
-                # if os.path.basename(doc_path) == "Company-10k-18pages.pdf":
-                #     print(f"DEBUG: Chunks for {os.path.basename(doc_path)} page 0:")
-                #     for i, chunk_doc in enumerate(chunks_from_pdf):
-                #         if chunk_doc.metadata.get('page') == 0: # Check if page metadata is 0
-                #             print(f"--- Chunk {i} (Page 0) ---")
-                #             print(chunk_doc.page_content[:500]) # Print first 500 chars
-                #             if i > 5: # Print a few chunks from page 0
-                #                 break 
-                
+                # Print summary instead of each document details
                 st.sidebar.write(f"Processed '{os.path.basename(doc_path)}': {len(chunks_from_pdf)} chunks total.")
-                print(f"DEBUG: Split {os.path.basename(doc_path)} into {len(chunks_from_pdf)} chunks.")
             except Exception as e:
                 st.sidebar.error(f"Error loading/splitting PDF '{os.path.basename(doc_path)}': {e}")
-                print(f"ERROR DEBUG: Error loading/splitting {doc_path}: {e}")
+                print(f"ERROR DEBUG: Error loading/splitting {os.path.basename(doc_path)}: {e}")
         else:
-            st.sidebar.warning(f"Document not found for splitting: {doc_path}")
-            print(f"DEBUG: Document not found: {doc_path}")
+            st.sidebar.warning(f"Document not found for splitting: {os.path.basename(doc_path)}")
+            print(f"DEBUG: Document not found: {os.path.basename(doc_path)}")
     print(f"DEBUG: Total document chunks created from all PDFs: {len(all_document_chunks)}")
     return all_document_chunks
 
@@ -140,8 +130,99 @@ def initialize_vector_store(embeddings_model):
         print(f"ERROR DEBUG: Error creating vector store from documents: {e}")
         return None
 
+def get_all_document_names():
+    """Returns a list of all document names in the documents directory."""
+    import glob
+    document_files = glob.glob(os.path.join(DOCUMENTS_DIR, "*.pdf"))
+    return [os.path.basename(doc) for doc in document_files]
+
+def resync_knowledge_base(embeddings_model):
+    """Rebuilds the entire knowledge base by processing all documents in the documents directory."""
+    if embeddings_model is None:
+        st.sidebar.error("Embedding model not loaded. Cannot sync knowledge base.")
+        return None
+    
+    import glob
+    os.makedirs(VECTOR_STORE_DIR, exist_ok=True)
+    
+    # Get all PDF files in the documents directory
+    all_document_paths = glob.glob(os.path.join(DOCUMENTS_DIR, "*.pdf"))
+    
+    if not all_document_paths:
+        st.sidebar.warning("No documents found to sync in the knowledge base.")
+        return None
+    
+    st.sidebar.info(f"Syncing knowledge base with {len(all_document_paths)} documents...")
+    print(f"DEBUG: Rebuilding vector store with {len(all_document_paths)} documents")
+    
+    # Process all documents at once
+    all_document_chunks = _load_and_split_pdfs(all_document_paths)
+    
+    if not all_document_chunks:
+        st.sidebar.error("Failed to process documents. No chunks created. Knowledge base not updated.")
+        return None
+    
+    try:
+        vector_store = FAISS.from_documents(all_document_chunks, embeddings_model)
+        vector_store.save_local(folder_path=VECTOR_STORE_DIR, index_name="faiss_index")
+        st.sidebar.success(f"Knowledge base synced with {len(all_document_chunks)} chunks from {len(all_document_paths)} documents.")
+        if hasattr(vector_store, 'index') and vector_store.index:
+            print(f"DEBUG: Synced vector store has {vector_store.index.ntotal} vectors")
+        return vector_store
+    except Exception as e:
+        st.sidebar.error(f"Error syncing knowledge base: {e}")
+        print(f"ERROR: Failed to create vector store during sync: {e}")
+        return None
+
+def remove_document_from_kb(document_name, vector_store, embeddings_model):
+    """Removes a document from the knowledge base by rebuilding the vector store without it."""
+    if embeddings_model is None or vector_store is None:
+        st.sidebar.error("Embedding model or vector store not available. Cannot remove document.")
+        return vector_store
+    
+    import glob
+    document_path = os.path.join(DOCUMENTS_DIR, document_name)
+    
+    # First check if the document exists
+    if not os.path.exists(document_path):
+        st.sidebar.error(f"Document '{document_name}' not found.")
+        return vector_store
+    
+    # Get all documents except the one to remove
+    all_document_paths = glob.glob(os.path.join(DOCUMENTS_DIR, "*.pdf"))
+    remaining_documents = [doc for doc in all_document_paths if os.path.basename(doc) != document_name]
+    
+    if not remaining_documents:
+        st.sidebar.warning("This is the only document in the knowledge base. Removing it will empty the KB.")
+        try:
+            # Create an empty vector store
+            empty_vector_store = FAISS.from_documents([], embeddings_model)
+            empty_vector_store.save_local(folder_path=VECTOR_STORE_DIR, index_name="faiss_index")
+            st.sidebar.success(f"Document '{document_name}' removed. Knowledge base is now empty.")
+            return empty_vector_store
+        except Exception as e:
+            st.sidebar.error(f"Error creating empty vector store: {e}")
+            return vector_store
+    
+    # Rebuild vector store with remaining documents
+    st.sidebar.info(f"Rebuilding knowledge base without '{document_name}'...")
+    all_document_chunks = _load_and_split_pdfs(remaining_documents)
+    
+    if not all_document_chunks:
+        st.sidebar.error("Failed to process remaining documents. Knowledge base not updated.")
+        return vector_store
+    
+    try:
+        new_vector_store = FAISS.from_documents(all_document_chunks, embeddings_model)
+        new_vector_store.save_local(folder_path=VECTOR_STORE_DIR, index_name="faiss_index")
+        st.sidebar.success(f"Document '{document_name}' removed from knowledge base.")
+        return new_vector_store
+    except Exception as e:
+        st.sidebar.error(f"Error rebuilding vector store: {e}")
+        return vector_store
+
 def add_documents_to_vector_store(uploaded_files, vector_store, embeddings_model):
-    print("DEBUG: add_documents_to_vector_store called.")
+    print(f"DEBUG: Processing {len(uploaded_files)} uploaded files")
     if not uploaded_files:
         st.sidebar.info("No files were selected for upload.")
         return vector_store
@@ -165,7 +246,7 @@ def add_documents_to_vector_store(uploaded_files, vector_store, embeddings_model
             saved_files_count += 1
         except Exception as e:
             st.sidebar.error(f"Error saving uploaded file '{uploaded_file.name}': {e}")
-            print(f"ERROR DEBUG: Error saving uploaded file {uploaded_file.name}: {e}")
+            print(f"ERROR: Failed to save '{uploaded_file.name}': {e}")
 
     if not temp_doc_paths:
         st.sidebar.warning("No valid files could be saved for processing.")
@@ -180,14 +261,15 @@ def add_documents_to_vector_store(uploaded_files, vector_store, embeddings_model
             vector_store.save_local(folder_path=VECTOR_STORE_DIR, index_name="faiss_index")
             st.sidebar.success(f"{len(new_document_chunks)} new chunks added.")
             if hasattr(vector_store, 'index') and vector_store.index:
-                 print(f"DEBUG: Updated vector store has {vector_store.index.ntotal} vectors.")
+                 print(f"DEBUG: Vector store updated with {len(new_document_chunks)} new chunks. Total: {vector_store.index.ntotal} vectors.")
         except Exception as e:
             st.sidebar.error(f"Error adding documents: {e}")
-            print(f"ERROR DEBUG: Error adding documents to vector store: {e}")
+            print(f"ERROR: Failed to add documents to vector store: {e}")
     else:
         st.sidebar.warning("No text could be extracted from the uploaded documents to add.")
-        print("DEBUG: No new chunks extracted from uploaded documents.")
+        print("DEBUG: No chunks created from uploaded documents")
 
+    # Clean up temporary files
     for path in temp_doc_paths: 
         try:
             os.remove(path)
@@ -224,6 +306,7 @@ You are a helpful AI assistant.
 If relevant context from documents is provided below, please use it to answer the question.
 If the context does not help answer the question, or if no context is provided, please answer the question using your general knowledge.
 If you are using information from the provided documents, please indicate that.
+Indicate the source of the information in your answer.
 
 Context:
 {context}
@@ -265,3 +348,42 @@ def format_chat_history_for_prompt(streamlit_messages):
                 text_content = content_item.get("text", "")
         history_string += f"{role}: {text_content}\n"
     return history_string.strip()
+
+def get_knowledge_base_stats():
+    """Returns statistics about the knowledge base, including document count and vector count."""
+    stats = {
+        "document_count": 0,
+        "vector_count": 0,
+        "vector_store_exists": False,
+        "documents_exist": False
+    }
+    
+    # Check if vector store files exist
+    if os.path.exists(VECTOR_STORE_PATH + ".faiss") and os.path.exists(VECTOR_STORE_PATH + ".pkl"):
+        stats["vector_store_exists"] = True
+    
+    # Count documents
+    import glob
+    document_files = glob.glob(os.path.join(DOCUMENTS_DIR, "*.pdf"))
+    stats["document_count"] = len(document_files)
+    stats["documents_exist"] = len(document_files) > 0
+    
+    # Try to get vector count
+    try:
+        if stats["vector_store_exists"]:
+            # FAISS doesn't provide a way to get vector count without loading
+            # This is just a placeholder - in a real app we might store this metadata separately
+            stats["vector_count"] = "Available after loading vector store"
+    except Exception:
+        pass
+    
+    # Get total size of vector store files
+    vector_store_size = 0
+    if os.path.exists(VECTOR_STORE_PATH + ".faiss"):
+        vector_store_size += os.path.getsize(VECTOR_STORE_PATH + ".faiss")
+    if os.path.exists(VECTOR_STORE_PATH + ".pkl"):
+        vector_store_size += os.path.getsize(VECTOR_STORE_PATH + ".pkl")
+    
+    stats["vector_store_size_mb"] = round(vector_store_size / (1024 * 1024), 2) if vector_store_size > 0 else 0
+    
+    return stats

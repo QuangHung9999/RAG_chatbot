@@ -198,7 +198,12 @@ def remove_document_from_kb(document_name, vector_store, embeddings_model):
             # Create an empty vector store
             empty_vector_store = FAISS.from_documents([], embeddings_model)
             empty_vector_store.save_local(folder_path=VECTOR_STORE_DIR, index_name="faiss_index")
-            st.sidebar.success(f"Document '{document_name}' removed. Knowledge base is now empty.")
+            # Delete the document file from the documents folder
+            try:
+                os.remove(document_path)
+                st.sidebar.success(f"Document '{document_name}' removed from knowledge base and disk.")
+            except Exception as e:
+                st.sidebar.warning(f"Document removed from KB but could not delete file: {e}")
             return empty_vector_store
         except Exception as e:
             st.sidebar.error(f"Error creating empty vector store: {e}")
@@ -215,7 +220,12 @@ def remove_document_from_kb(document_name, vector_store, embeddings_model):
     try:
         new_vector_store = FAISS.from_documents(all_document_chunks, embeddings_model)
         new_vector_store.save_local(folder_path=VECTOR_STORE_DIR, index_name="faiss_index")
-        st.sidebar.success(f"Document '{document_name}' removed from knowledge base.")
+        # Delete the document file from the documents folder
+        try:
+            os.remove(document_path)
+            st.sidebar.success(f"Document '{document_name}' removed from knowledge base and disk.")
+        except Exception as e:
+            st.sidebar.warning(f"Document removed from KB but could not delete file: {e}")
         return new_vector_store
     except Exception as e:
         st.sidebar.error(f"Error rebuilding vector store: {e}")
@@ -233,33 +243,39 @@ def add_documents_to_vector_store(uploaded_files, vector_store, embeddings_model
         st.sidebar.error("Embedding model not loaded. Cannot add documents.")
         return vector_store
 
-    temp_doc_paths = []
+    import datetime
+    
+    doc_paths = []
     saved_files_count = 0
     os.makedirs(DOCUMENTS_DIR, exist_ok=True)
     for uploaded_file in uploaded_files:
-        # Create a unique name for temporary files
-        temp_file_path = os.path.join(DOCUMENTS_DIR, f"uploaded_{uploaded_file.file_id}_{uploaded_file.name}")
+        # Generate timestamp for uniqueness
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Get file name parts
+        file_name, file_ext = os.path.splitext(uploaded_file.name)
+        # Create a name for permanent storage in documents folder with timestamp to avoid overwriting
+        file_path = os.path.join(DOCUMENTS_DIR, f"{file_name}_{timestamp}{file_ext}")
         try:
-            with open(temp_file_path, "wb") as f:
+            with open(file_path, "wb") as f:
                 f.write(uploaded_file.getbuffer())
-            temp_doc_paths.append(temp_file_path)
+            doc_paths.append(file_path)
             saved_files_count += 1
         except Exception as e:
             st.sidebar.error(f"Error saving uploaded file '{uploaded_file.name}': {e}")
             print(f"ERROR: Failed to save '{uploaded_file.name}': {e}")
 
-    if not temp_doc_paths:
+    if not doc_paths:
         st.sidebar.warning("No valid files could be saved for processing.")
         return vector_store
 
     st.sidebar.info(f"Processing {saved_files_count} uploaded document(s)...")
-    new_document_chunks = _load_and_split_pdfs(temp_doc_paths) 
+    new_document_chunks = _load_and_split_pdfs(doc_paths) 
     
     if new_document_chunks:
         try:
             vector_store.add_documents(new_document_chunks)
             vector_store.save_local(folder_path=VECTOR_STORE_DIR, index_name="faiss_index")
-            st.sidebar.success(f"{len(new_document_chunks)} new chunks added.")
+            st.sidebar.success(f"{len(new_document_chunks)} new chunks added. Files stored in documents folder.")
             if hasattr(vector_store, 'index') and vector_store.index:
                  print(f"DEBUG: Vector store updated with {len(new_document_chunks)} new chunks. Total: {vector_store.index.ntotal} vectors.")
         except Exception as e:
@@ -268,13 +284,6 @@ def add_documents_to_vector_store(uploaded_files, vector_store, embeddings_model
     else:
         st.sidebar.warning("No text could be extracted from the uploaded documents to add.")
         print("DEBUG: No chunks created from uploaded documents")
-
-    # Clean up temporary files
-    for path in temp_doc_paths: 
-        try:
-            os.remove(path)
-        except OSError:
-            pass
             
     return vector_store
 

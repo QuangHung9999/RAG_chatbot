@@ -2,6 +2,7 @@ import streamlit as st
 import os
 import dotenv
 from datetime import datetime
+from langchain_core.messages import HumanMessage, AIMessage
 
 # Assuming auth.py, rag_core.py are in the 'app' directory
 # Ensure runner.py correctly sets up sys.path for these imports
@@ -10,7 +11,7 @@ from app.rag_core import (
     initialize_vector_store,
     add_documents_to_vector_store,
     get_llm,
-    get_rag_chain,
+    get_agent_executor,
     format_chat_history_for_prompt,
     get_embeddings_model,
     get_all_document_names,
@@ -20,6 +21,7 @@ from app.rag_core import (
 )
 from app.config import (
     GOOGLE_API_KEY,
+    TAVILY_API_KEY,
     GOOGLE_MODELS,
     APP_TITLE,
     APP_SUBTITLE,
@@ -50,6 +52,7 @@ def chatbot_page():
     # Initialize session state flags if they don't exist
     default_keys = {
         "google_api_key": os.getenv("GOOGLE_API_KEY", GOOGLE_API_KEY),
+        "tavily_api_key": os.getenv("TAVILY_API_KEY", TAVILY_API_KEY),
         "messages": [],
         "embeddings_model_loaded": False,
         "embeddings_model": None,
@@ -57,7 +60,10 @@ def chatbot_page():
         "vector_store_initialized": False,
         "vector_store": None,
         "vector_store_init_attempted": False,
-        # Add conversation tracking session state
+        "agent_executor": None,
+        "agent_init_attempted": False,
+        "selected_model": GOOGLE_MODELS[0] if GOOGLE_MODELS else "gemini-1.5-flash",
+        "temperature": DEFAULT_TEMPERATURE,
         "conversation_tracker": None,
         "current_conversation_id": None,
     }
@@ -105,11 +111,64 @@ def chatbot_page():
             else:
                 print("DEBUG main_app: Vector store auto-initialization FAILED.")
 
+    # --- Agent Executor Initialization ---
+    # This needs to happen after LLM, retriever (from vector store) are ready,
+    # and also consider API keys, selected model, and temperature from session state.
+    # It should also re-initialize if relevant configs change (handled by st.rerun in sidebar).
+    if (
+        st.session_state.vector_store_initialized and 
+        st.session_state.google_api_key and 
+        (not st.session_state.agent_executor or not st.session_state.agent_init_attempted)
+    ):
+        # This block ensures agent is attempted to be initialized if it's None or previous attempt flag is false
+        # The actual re-initialization upon config change is driven by st.rerun() in the sidebar,
+        # which will lead to agent_executor being None here.
+        
+        print("DEBUG main_app: Condition met for agent initialization/re-initialization attempt.")
+        st.session_state.agent_init_attempted = True # Mark that we are attempting initialization in this pass
+
+        llm_for_agent = get_llm(
+            api_key=st.session_state.google_api_key,
+            model_name=st.session_state.selected_model,
+            temperature=st.session_state.temperature
+        )
+        
+        retriever_for_agent = None
+        if st.session_state.vector_store:
+            retriever_for_agent = st.session_state.vector_store.as_retriever(
+                search_type="similarity", search_kwargs={"k": RETRIEVER_K}
+            )
+        else:
+            print("WARN main_app: Vector store not available during agent initialization attempt. RAG tool may be impaired.")
+            # Agent can still be initialized, but RAG tool will be non-functional or degraded.
+
+        if llm_for_agent:
+            # Tavily API key is read from app.config within get_tools, but pass here for explicitness if needed by get_agent_executor directly
+            tavily_key_for_agent = st.session_state.get("tavily_api_key", TAVILY_API_KEY) # Use session state first, then config
+            
+            with st.spinner("Initializing AI Agent... Please wait."): # Spinner for clarity
+                print(f"DEBUG main_app: Calling get_agent_executor with LLM: {st.session_state.selected_model}, Temp: {st.session_state.temperature}")
+                st.session_state.agent_executor = get_agent_executor(
+                    llm_for_agent, 
+                    retriever_for_agent, # Can be None
+                    st.session_state.google_api_key, # For LLM inside agent if not using the one passed
+                    tavily_key_for_agent
+                )
+            
+            if st.session_state.agent_executor:
+                print("DEBUG main_app: Agent Executor initialized successfully.")
+                # Don't rerun here, let the chat input proceed or UI update naturally
+            else:
+                print("ERROR main_app: Agent Executor initialization FAILED.")
+                st.error("Failed to initialize the AI Agent. Please check configurations or API keys in the sidebar. Some features may be unavailable.")
+        else:
+            print("ERROR main_app: LLM for agent not available. Agent not initialized.")
+            st.error("LLM could not be initialized. Agent cannot function. Please check Google API key.")
+
     # --- Sidebar ---
     with st.sidebar:
         st.title(f"Welcome, {st.session_state.get('username', 'Guest')}!")
         if st.button("Logout", key="logout_btn_main_app_streaming"):
-            # End current conversation if one exists
             if st.session_state.current_conversation_id is not None:
                 if st.session_state.conversation_tracker:
                     st.session_state.conversation_tracker.end_conversation(
@@ -117,44 +176,92 @@ def chatbot_page():
                     )
                 st.session_state.current_conversation_id = None
             
-            keys_to_clear = list(default_keys.keys()) + [
-                "logged_in",
-                "username",
-                "page",
-            ]
-            for key in keys_to_clear:
-                if key in st.session_state:
-                    del st.session_state[key]
+            # Preserve API keys, model, and temperature on logout
+            preserved_keys = ["google_api_key", "tavily_api_key", "selected_model", "temperature"]
+            all_keys_to_clear = list(st.session_state.keys()) # Get all keys currently in session state
+            
+            for key in all_keys_to_clear:
+                if key not in preserved_keys and key not in ["page"]:
+                     # Clear keys not in preserved_keys, and don't clear 'page' yet
+                    if key in default_keys: # Only delete if it was part of initial setup, or is dynamic
+                         del st.session_state[key]
+            
+            # Reset other relevant session state items to their defaults from default_keys
+            for dk, dv in default_keys.items():
+                if dk not in preserved_keys and dk not in ["page"]:
+                    st.session_state[dk] = dv
+            
+            st.session_state["logged_in"] = False # Explicitly log out
+            st.session_state["username"] = None
             st.session_state["page"] = "login"
             st.rerun()
         st.divider()
 
         st.subheader("Configuration")
-        current_api_key = st.session_state.google_api_key
+        
+        # API Keys
+        current_google_api_key = st.session_state.get("google_api_key", "")
         google_api_key_input = st.text_input(
             "Google API Key:",
-            value=current_api_key,
+            value=current_google_api_key,
             type="password",
             key="google_api_key_input_ui_streaming",
             help="Enter your Google API Key.",
         )
-        if google_api_key_input != current_api_key:
+        if google_api_key_input != current_google_api_key:
             st.session_state.google_api_key = google_api_key_input
+            st.session_state.agent_executor = None 
+            st.session_state.agent_init_attempted = False
+            print("DEBUG main_app: Google API Key changed, agent invalidated.")
+            st.rerun() # Rerun to re-initialize agent with new key
+
+        current_tavily_api_key = st.session_state.get("tavily_api_key", "")
+        tavily_api_key_input = st.text_input(
+            "Tavily API Key:",
+            value=current_tavily_api_key,
+            type="password",
+            key="tavily_api_key_input_ui_streaming",
+            help="Enter your Tavily API Key for web search.",
+        )
+        if tavily_api_key_input != current_tavily_api_key:
+            st.session_state.tavily_api_key = tavily_api_key_input
+            st.session_state.agent_executor = None 
+            st.session_state.agent_init_attempted = False
+            print("DEBUG main_app: Tavily API Key changed, agent invalidated.")
+            st.rerun() # Rerun to re-initialize agent with new key
+
+        # LLM Configuration
+        selected_model_val = st.session_state.get("selected_model", GOOGLE_MODELS[0] if GOOGLE_MODELS else "gemini-1.5-flash")
+        temperature_val = st.session_state.get("temperature", DEFAULT_TEMPERATURE)
 
         selected_model = st.selectbox(
             "Select LLM Model:",
             GOOGLE_MODELS,
-            index=0,
+            index=GOOGLE_MODELS.index(selected_model_val) if selected_model_val in GOOGLE_MODELS else 0, 
             key="llm_model_select_ui_streaming",
         )
+        if selected_model != selected_model_val: 
+            st.session_state.selected_model = selected_model
+            st.session_state.agent_executor = None
+            st.session_state.agent_init_attempted = False
+            print("DEBUG main_app: LLM Model changed, agent invalidated.")
+            st.rerun() # Rerun to re-initialize agent
+
         temperature = st.slider(
             "Temperature (Creativity):",
             0.0,
             1.0,
-            DEFAULT_TEMPERATURE,
+            temperature_val, 
             0.05,
             key="temperature_slider_ui_streaming",
         )
+        if temperature != temperature_val: 
+            st.session_state.temperature = temperature
+            st.session_state.agent_executor = None
+            st.session_state.agent_init_attempted = False
+            print("DEBUG main_app: Temperature changed, agent invalidated.")
+            st.rerun() # Rerun to re-initialize agent
+        
         st.divider()
 
         st.subheader("Knowledge Base Status")
@@ -386,237 +493,176 @@ def chatbot_page():
             st.session_state.messages = []
             st.rerun()
 
-    # --- Main Chat Interface ---
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            if isinstance(message.get("content"), list) and len(message["content"]) > 0:
-                if message["content"][0].get("type") == "text":
-                    st.markdown(message["content"][0].get("text", ""))
+    # Display existing messages (ensure this is after potential agent init)
+    for msg_idx, msg_data in enumerate(st.session_state.messages):
+        role = msg_data["role"]
+        content = msg_data["content"]
+        text_to_display = ""
+        if isinstance(content, str):
+            text_to_display = content
+        elif isinstance(content, list) and content: 
+            first_content_item = content[0]
+            if isinstance(first_content_item, dict) and "text" in first_content_item:
+                text_to_display = first_content_item["text"]
+            elif isinstance(first_content_item, str):
+                 text_to_display = first_content_item
+        
+        with st.chat_message(role): 
+            st.markdown(text_to_display)
 
+    # Determine if chat input should be disabled
     prompt_disabled = False
     disabled_reason = ""
     if not st.session_state.google_api_key:
-        prompt_disabled = True
         disabled_reason += "Google API Key missing. "
-    if not st.session_state.embeddings_model_loaded:
         prompt_disabled = True
-        disabled_reason += "Embedding model not loaded. "
-    if (
-        not st.session_state.vector_store_initialized
-        or not st.session_state.vector_store
-    ):
+    if not st.session_state.tavily_api_key: # Check for Tavily key too
+        disabled_reason += "Tavily API Key missing for web search. "
+        # Don't disable entirely for this, but agent might not use web search.
+        # For now, let's keep it enabled but user should be aware.
+    if not st.session_state.agent_executor:
+        disabled_reason += "Agent not initialized. "
         prompt_disabled = True
-        disabled_reason += "Knowledge Base not initialized. "
-
+    
     if prompt_disabled:
-        if not st.session_state.embeddings_model_loaded or (
-            st.session_state.embeddings_model_loaded
-            and not st.session_state.vector_store_initialized
-            and not (
-                st.session_state.vector_store_init_attempted
-                and not st.session_state.vector_store
-            )
-        ):
-            st.info("🔄 Setting up chatbot essentials... Please wait or check sidebar.")
-        elif disabled_reason:
-            st.info(f"⬅️ Chat disabled. Resolve in sidebar: {disabled_reason.strip()}")
+        st.info(f"⬅️ Chat input disabled. Resolve in sidebar: {disabled_reason.strip()}")
 
-    if prompt := st.chat_input(
-        "Ask a question about the documents...",
-        disabled=prompt_disabled,
-        key="chat_input_main_streaming",
-    ):
+    # Handle new user input
+    if prompt := st.chat_input("Ask me anything about your documents or beyond...", disabled=prompt_disabled):
         print(f"\nDEBUG main_app: User prompt: {prompt}")
-        critical_failure = False
-        error_msg_display = "Cannot process request: "
-        if not st.session_state.google_api_key:
-            error_msg_display += "Google API Key missing. "
-            critical_failure = True
-        if not st.session_state.embeddings_model_loaded:
-            error_msg_display += "Embedding model not loaded. "
-            critical_failure = True
-        if (
-            not st.session_state.vector_store_initialized
-            or not st.session_state.vector_store
-        ):
-            error_msg_display += "Knowledge Base not initialized. "
-            critical_failure = True
-
-        if critical_failure:
-            st.error(
-                f"⬅️ {error_msg_display.strip()}Please check sidebar configuration."
-            )
-            st.stop()
-
+        # Append user message with a timestamp for unique keys in loops
         st.session_state.messages.append(
-            {"role": "user", "content": [{"type": "text", "text": prompt}]}
+            {"role": "user", "content": prompt, "timestamp": datetime.now().timestamp()} 
         )
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        llm = get_llm(
-            api_key=st.session_state.google_api_key,
-            model_name=selected_model,
-            temperature=temperature,
+        # Ensure agent is ready (double check after input)
+        if not st.session_state.agent_executor:
+            st.error("Agent is not ready. Please check configurations in the sidebar (e.g., API keys) and ensure the agent has initialized.")
+            st.stop() 
+
+        # Prepare chat history for the agent
+        chat_history_for_agent = format_chat_history_for_prompt(
+            st.session_state.messages[:-1]  # Exclude the current user prompt
         )
-        if not llm:
-            st.session_state.messages.append(
-                {
-                    "role": "assistant",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "Error: LLM could not be initialized. Check API key.",
-                        }
-                    ],
+        
+        with st.chat_message("assistant"):
+            try:
+                response_payload = {
+                    "input": prompt,
+                    "chat_history": chat_history_for_agent,
                 }
-            )
-            st.rerun()
+                print(f"DEBUG main_app: Invoking Agent with input: '{prompt}', history_len: {len(chat_history_for_agent)}")
 
-        retriever = st.session_state.vector_store.as_retriever(
-            search_type="similarity", search_kwargs={"k": 10}
-        )
+                # --- AGENT STREAMING IMPLEMENTATION ---
+                def stream_agent_response_chunks():
+                    if st.session_state.current_conversation_id is None:
+                        user_id = st.session_state.get("username", "Guest")
+                        st.session_state.current_conversation_id = st.session_state.conversation_tracker.start_conversation(user_id)
+                    
+                    overall_timer = Timer().start()
+                    
+                    st.session_state.conversation_tracker.add_message(
+                        st.session_state.current_conversation_id,
+                        'user',
+                        prompt,
+                        {'tokens': estimate_tokens(prompt)} 
+                    )
+                    
+                    generation_timer = Timer().start()
+                    full_agent_output = ""
+                    
+                    message_placeholder = st.empty()
+                    current_thought_process = "*Thinking...*\n\n" 
+                    message_placeholder.markdown(current_thought_process)
+                    log_stream_to_console = True 
 
-        print("DEBUG main_app: Attempting to retrieve documents with retriever...")
-        try:
-            retrieved_docs = retriever.invoke(prompt)
-            # (Debug printing for retrieved_docs can be kept here if needed)
-        except Exception as e_retrieve:
-            print(f"ERROR main_app: Error during retriever.invoke: {e_retrieve}")
-            retrieved_docs = []
+                    try:
+                        for chunk in st.session_state.agent_executor.stream(response_payload):
+                            if log_stream_to_console:
+                                print(f"DEBUG agent_stream chunk: {chunk}")
+                            
+                            if "actions" in chunk and chunk["actions"]:
+                                for action in chunk["actions"]:
+                                    tool_name = action.tool
+                                    tool_input = action.tool_input
+                                    tool_input_str = str(tool_input) 
+                                    current_thought_process += f"**Tool Call:** `{tool_name}` with input `{tool_input_str}`\n\n"
+                                    message_placeholder.markdown(current_thought_process)
+                            
+                            elif "steps" in chunk and chunk["steps"]:
+                                for step in chunk["steps"]:
+                                    observation_str = str(step.observation)
+                                    max_obs_len = 250 
+                                    truncated_obs = observation_str[:max_obs_len] + ("..." if len(observation_str) > max_obs_len else "")
+                                    current_thought_process += f"**Observation:** `{truncated_obs}`\n\n"
+                                    message_placeholder.markdown(current_thought_process)
+                            
+                            elif "output" in chunk and chunk["output"] is not None:
+                                token = chunk["output"]
+                                full_agent_output += token
+                                message_placeholder.markdown(full_agent_output)
+                            
+                            elif "messages" in chunk and chunk["messages"]:
+                                for msg_obj in chunk["messages"]:
+                                    if isinstance(msg_obj, AIMessage) and msg_obj.content:
+                                        if not full_agent_output: 
+                                            token = msg_obj.content
+                                            full_agent_output = token 
+                                            message_placeholder.markdown(full_agent_output)
+                                            break 
+                    except Exception as stream_ex:
+                        print(f"ERROR main_app: Exception during agent stream processing: {stream_ex}")
+                        full_agent_output = "An error occurred while processing the agent's response stream."
+                        if message_placeholder: # Check if placeholder exists
+                            message_placeholder.error(full_agent_output)
+                        else:
+                            st.error(full_agent_output) # Fallback if placeholder doesn't exist
 
-        rag_chain = get_rag_chain(llm, retriever)
-        if not rag_chain:
-            st.session_state.messages.append(
-                {
-                    "role": "assistant",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "Error: RAG chain could not be initialized.",
-                        }
-                    ],
-                }
-            )
-            st.rerun()
+                    if full_agent_output: 
+                        if message_placeholder: message_placeholder.markdown(full_agent_output)
+                    elif current_thought_process != "*Thinking...*\n\n": 
+                        full_agent_output = current_thought_process + "\n*Agent finished processing but did not produce a direct output message.*"
+                        if message_placeholder: message_placeholder.markdown(full_agent_output)
+                    else: 
+                        full_agent_output = "*Agent finished processing but did not produce an output.*"
+                        if message_placeholder: message_placeholder.markdown(full_agent_output)
 
-        if llm and rag_chain:
-            chat_history_for_prompt = format_chat_history_for_prompt(
-                st.session_state.messages[:-1]
-            )
-
-            with st.chat_message("assistant"):
-                try:
-                    response_payload = {
-                        "input": prompt,
-                        "chat_history": chat_history_for_prompt,
+                    generation_time = generation_timer.stop().elapsed_ms()
+                    total_latency = overall_timer.stop().elapsed_ms()
+                    
+                    assistant_metrics = {
+                        'tokens': estimate_tokens(full_agent_output),
+                        'latency_ms': total_latency,
+                        'generation_time_ms': generation_time, 
                     }
-                    print(
-                        f"DEBUG main_app: Invoking RAG chain with payload for streaming..."
+                    
+                    st.session_state.conversation_tracker.add_message(
+                        st.session_state.current_conversation_id,
+                        'assistant',
+                        full_agent_output,
+                        assistant_metrics
                     )
-
-                    # --- STREAMING IMPLEMENTATION ---
-                    # Define a generator function that yields content from the stream
-                    def stream_response_chunks():
-                        # Start conversation if not already started
-                        if st.session_state.current_conversation_id is None:
-                            user_id = st.session_state.get("username", "Guest")
-                            st.session_state.current_conversation_id = st.session_state.conversation_tracker.start_conversation(user_id)
-                        
-                        # Track user message with metrics
-                        overall_timer = Timer().start()
-                        retrieval_timer = Timer().start()
-                        
-                        # Get number of retrieved documents
-                        num_docs_retrieved = len(retrieved_docs) if retrieved_docs else 0
-                        retrieval_time = retrieval_timer.stop().elapsed_ms()
-                        
-                        # Add user message to conversation history
-                        user_metrics = {
-                            'tokens': estimate_tokens(prompt),
-                            'retrieval_time_ms': retrieval_time,
-                            'documents_retrieved': num_docs_retrieved
-                        }
-                        st.session_state.conversation_tracker.add_message(
-                            st.session_state.current_conversation_id,
-                            'user',
-                            prompt,
-                            user_metrics
-                        )
-                        
-                        # Begin tracking assistant response
-                        generation_timer = Timer().start()
-                        full_response_accumulator = ""
-                        
-                        for chunk in rag_chain.stream(response_payload):
-                            if "answer" in chunk:
-                                token = chunk["answer"]
-                                full_response_accumulator += token
-                                yield token  # Yield the token for st.write_stream
-                        
-                        # After streaming is complete, record metrics
-                        generation_time = generation_timer.stop().elapsed_ms()
-                        total_latency = overall_timer.stop().elapsed_ms()
-                        
-                        # Add assistant message to conversation history with metrics
-                        assistant_metrics = {
-                            'tokens': estimate_tokens(full_response_accumulator),
-                            'latency_ms': total_latency,
-                            'generation_time_ms': generation_time,
-                            'retrieval_time_ms': retrieval_time,
-                            'documents_retrieved': num_docs_retrieved
-                        }
-                        
-                        st.session_state.conversation_tracker.add_message(
-                            st.session_state.current_conversation_id,
-                            'assistant',
-                            full_response_accumulator,
-                            assistant_metrics
-                        )
-                        
-                        # Save the full response to chat history
-                        st.session_state.messages.append(
-                            {
-                                "role": "assistant",
-                                "content": [
-                                    {"type": "text", "text": full_response_accumulator}
-                                ],
-                            }
-                        )
-                        print(
-                            f"DEBUG main_app: RAG chain full streamed response: {full_response_accumulator}"
-                        )
-                        print(f"DEBUG main_app: Response metrics - Tokens: {assistant_metrics['tokens']}, " 
-                              f"Latency: {assistant_metrics['latency_ms']}ms, "
-                              f"Generation: {assistant_metrics['generation_time_ms']}ms, "
-                              f"Retrieval: {assistant_metrics['retrieval_time_ms']}ms, "
-                              f"Docs: {assistant_metrics['documents_retrieved']}")
-
-                    # Use st.write_stream to display the streaming response
-                    st.write_stream(stream_response_chunks)
-                    # --- END STREAMING IMPLEMENTATION ---
-
-                except Exception as e_rag:
-                    st.error(f"Error during RAG chain execution: {e_rag}")
-                    print(f"ERROR main_app: RAG chain execution error: {e_rag}")
-                    # Add error to chat history if streaming failed partway
-                    error_message_for_history = (
-                        "Sorry, an error occurred while generating the response."
-                    )
-                    st.markdown(
-                        error_message_for_history
-                    )  # Display error in current chat bubble
+                    
                     st.session_state.messages.append(
-                        {
-                            "role": "assistant",
-                            "content": [
-                                {"type": "text", "text": error_message_for_history}
-                            ],
-                        }
+                        {"role": "assistant", "content": full_agent_output, "timestamp": datetime.now().timestamp()}
                     )
+                    print(f"DEBUG main_app: Agent full streamed output recorded: {full_agent_output}")
+                
+                # Execute the streaming logic. The function updates message_placeholder internally.
+                stream_agent_response_chunks()
 
-                # No explicit st.rerun() here, st.write_stream handles its updates.
-                # The full message is appended to history inside stream_response_chunks.
+            except Exception as e_agent: # Correctly aligned with the outer try block
+                st.error(f"Error during Agent execution: {e_agent}")
+                print(f"ERROR main_app: Agent execution error: {e_agent}")
+                error_message_for_history = (
+                    "Sorry, an error occurred while the agent was processing your request."
+                )
+                st.markdown(error_message_for_history)
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": error_message_for_history, "timestamp": datetime.now().timestamp()}
+                )
 
 
 def admin_page():

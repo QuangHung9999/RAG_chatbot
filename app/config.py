@@ -9,6 +9,7 @@ APP_ENV = os.getenv("APP_ENV", "development")
 
 # API Keys 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 
 # Database Configuration
 DB_PATH = os.getenv("DB_PATH", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "users.db"))

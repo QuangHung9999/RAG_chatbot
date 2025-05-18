@@ -17,9 +17,9 @@ CHAT_HISTORY_DB_PATH = os.getenv("CHAT_HISTORY_DB_PATH", os.path.join(os.path.di
 
 # Models Configuration
 EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2")
-GOOGLE_MODELS = os.getenv("GOOGLE_MODELS", "gemini-1.5-flash,gemini-1.5-pro,gemini-pro").split(",")
+GOOGLE_MODELS = os.getenv("GOOGLE_MODELS", "gemini-1.5-flash").split(",")
 DEFAULT_GOOGLE_MODEL = os.getenv("DEFAULT_GOOGLE_MODEL", "gemini-1.5-flash")
-DEFAULT_TEMPERATURE = float(os.getenv("DEFAULT_TEMPERATURE", "0.3"))
+DEFAULT_TEMPERATURE = float(os.getenv("DEFAULT_TEMPERATURE", "0.5"))
 
 # File paths and directories
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

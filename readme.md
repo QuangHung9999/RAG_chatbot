@@ -33,8 +33,6 @@ project_root/  # This is "python_ai_chat" directory
 ├── documents/           # Store PDFs here
 │   └── source_document.pdf
 ├── vector_store_data/   #For FAISS index etc.
-├── Dockerfile  
-├── docker-compose.yml 
 ├── requirements.txt
 └── .env
 ```

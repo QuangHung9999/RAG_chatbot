@@ -5,6 +5,7 @@ __pycache__
 *.jpg
 *.mp4
 *.png
+Rag_chatbot_keypair.pem
 
 # Allow
 !fridge_food.jpg

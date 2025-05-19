@@ -424,7 +424,7 @@ def chatbot_page():
                     if not st.session_state.files_processed:
                         uploaded_files = st.file_uploader(
                             "Select PDF files to add",
-                            type=["pdf"],
+                            type=["pdf", "png", "jpg", "jpeg", "docx", "xlsx", "csv"],
                             accept_multiple_files=True,
                             key="pdf_uploader_ui_sidebar_streaming",
                         )

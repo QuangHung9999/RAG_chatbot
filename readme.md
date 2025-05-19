@@ -2,6 +2,8 @@
 
 Streamlit app to interact with OpenAI GPT-4o, with text, images and audio (using Whisper and TTS).
 
+![1747619014961](image/readme/1747619014961.png)
+
 ---
 
 ## Require: python 3.12

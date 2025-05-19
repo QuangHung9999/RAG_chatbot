@@ -2,7 +2,7 @@ import streamlit as st
 import os
 # Updated import for HuggingFaceEmbeddings:
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, UnstructuredExcelLoader, CSVLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -17,6 +17,7 @@ from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain.tools import Tool
 from langchain import hub # To pull pre-defined prompts
 from app.config import TAVILY_API_KEY # Import Tavily API key
+from app.config import CHUNK_SIZE, CHUNK_OVERLAP # Import CHUNK_SIZE and CHUNK_OVERLAP
 
 # --- Configuration ---
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -44,39 +45,86 @@ def get_embeddings_model():
         return None
 
 # --- Vector Store ---
-def _load_and_split_pdfs(pdf_paths):
-    """Loads and splits multiple PDF documents into chunks."""
+def _load_and_split_documents(doc_paths):
+    """Loads and splits multiple documents into chunks based on their file type."""
     all_document_chunks = []
-    print(f"DEBUG: _load_and_split_pdfs called with {len(pdf_paths)} paths")
-    for doc_path in pdf_paths:
-        if os.path.exists(doc_path):
-            try:
-                # Don't print every file path to reduce log spam
-                loader = PyPDFLoader(doc_path)
-                documents = loader.load() # PyPDFLoader loads page by page
-                if not documents:
-                    st.warning(f"No content loaded from PDF: {os.path.basename(doc_path)}")
-                    print(f"DEBUG: No documents loaded from {os.path.basename(doc_path)}")
-                    continue
-                
-                text_splitter = RecursiveCharacterTextSplitter(
-                    chunk_size=1000, 
-                    chunk_overlap=200,
-                    length_function=len
-                )
-                # Each 'document' from PyPDFLoader is a page, split each page
-                chunks_from_pdf = text_splitter.split_documents(documents)
-                all_document_chunks.extend(chunks_from_pdf)
-                
-                # Print summary instead of each document details
-                st.sidebar.write(f"Processed '{os.path.basename(doc_path)}': {len(chunks_from_pdf)} chunks total.")
-            except Exception as e:
-                st.sidebar.error(f"Error loading/splitting PDF '{os.path.basename(doc_path)}': {e}")
-                print(f"ERROR DEBUG: Error loading/splitting {os.path.basename(doc_path)}: {e}")
-        else:
+    print(f"DEBUG: _load_and_split_documents called with {len(doc_paths)} paths")
+    
+    # Define supported document extensions and their loaders
+    # Images are listed but will be skipped for now in text processing.
+    # Their handling (e.g., multimodal RAG) can be added later.
+    supported_loaders = {
+        ".pdf": PyPDFLoader,
+        ".docx": Docx2txtLoader,
+        ".xlsx": UnstructuredExcelLoader, # mode="elements" or "single" can be specified
+        ".csv": CSVLoader,
+        # Image types - will be skipped for now
+        ".png": None, 
+        ".jpg": None,
+        ".jpeg": None,
+    }
+
+    for doc_path in doc_paths:
+        if not os.path.exists(doc_path):
             st.sidebar.warning(f"Document not found for splitting: {os.path.basename(doc_path)}")
             print(f"DEBUG: Document not found: {os.path.basename(doc_path)}")
-    print(f"DEBUG: Total document chunks created from all PDFs: {len(all_document_chunks)}")
+            continue
+
+        file_name, file_ext = os.path.splitext(doc_path)
+        file_ext = file_ext.lower()
+
+        if file_ext not in supported_loaders:
+            st.sidebar.warning(f"Unsupported file type: {os.path.basename(doc_path)}. Skipping.")
+            print(f"DEBUG: Unsupported file type {file_ext} for {os.path.basename(doc_path)}")
+            continue
+        
+        if supported_loaders[file_ext] is None: # Handle image types
+            st.sidebar.info(f"Image file {os.path.basename(doc_path)} detected. Skipping text extraction for now.")
+            print(f"DEBUG: Skipping image file {os.path.basename(doc_path)} for text extraction.")
+            # Placeholder for image handling:
+            # For example, could store image paths or use a multimodal model
+            continue
+
+        try:
+            LoaderClass = supported_loaders[file_ext]
+            # Specific loader arguments can be passed here if needed
+            if file_ext == ".xlsx":
+                loader = LoaderClass(doc_path, mode="single") # Example: using "single" mode for excel
+            elif file_ext == ".csv":
+                loader = LoaderClass(file_path=doc_path) # CSVLoader takes file_path
+            else:
+                loader = LoaderClass(doc_path)
+            
+            documents = loader.load()
+
+            if not documents:
+                st.warning(f"No content loaded from: {os.path.basename(doc_path)}")
+                print(f"DEBUG: No documents loaded from {os.path.basename(doc_path)}")
+                continue
+            
+            # Use CHUNK_SIZE and CHUNK_OVERLAP from config.py if session_state is not available or keys are missing
+            current_chunk_size = CHUNK_SIZE
+            current_chunk_overlap = CHUNK_OVERLAP
+            if hasattr(st, 'session_state'):
+                current_chunk_size = st.session_state.get("chunk_size", CHUNK_SIZE)
+                current_chunk_overlap = st.session_state.get("chunk_overlap", CHUNK_OVERLAP)
+            
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=current_chunk_size,
+                chunk_overlap=current_chunk_overlap,
+                length_function=len
+            )
+            chunks_from_doc = text_splitter.split_documents(documents)
+            all_document_chunks.extend(chunks_from_doc)
+            
+            st.sidebar.write(f"Processed '{os.path.basename(doc_path)}': {len(chunks_from_doc)} chunks total.")
+            print(f"DEBUG: Processed {os.path.basename(doc_path)}, created {len(chunks_from_doc)} chunks.")
+
+        except Exception as e:
+            st.sidebar.error(f"Error loading/splitting {os.path.basename(doc_path)}: {e}")
+            print(f"ERROR DEBUG: Error loading/splitting {os.path.basename(doc_path)}: {e}")
+
+    print(f"DEBUG: Total document chunks created from all processed files: {len(all_document_chunks)}")
     return all_document_chunks
 
 def initialize_vector_store(embeddings_model):
@@ -116,7 +164,7 @@ def initialize_vector_store(embeddings_model):
 
     st.sidebar.info(f"Creating new knowledge base from '{SOURCE_DOCUMENT_FILENAME}'...")
     print(f"DEBUG: Creating new vector store from {SOURCE_DOCUMENT_PATH}")
-    document_chunks = _load_and_split_pdfs([SOURCE_DOCUMENT_PATH])
+    document_chunks = _load_and_split_documents([SOURCE_DOCUMENT_PATH])
     
     if not document_chunks:
         st.sidebar.error("Failed to process the source document. No chunks created. Knowledge base not initialized.")
@@ -138,10 +186,24 @@ def initialize_vector_store(embeddings_model):
         return None
 
 def get_all_document_names():
-    """Returns a list of all document names in the documents directory."""
+    """Returns a list of all supported document names in the documents directory."""
     import glob
-    document_files = glob.glob(os.path.join(DOCUMENTS_DIR, "*.pdf"))
-    return [os.path.basename(doc) for doc in document_files]
+    
+    # Define supported extensions for listing (includes images)
+    supported_extensions_for_listing = [".pdf", ".docx", ".xlsx", ".csv", ".png", ".jpg", ".jpeg"]
+    all_files = []
+    if os.path.exists(DOCUMENTS_DIR):
+        for ext in supported_extensions_for_listing:
+            all_files.extend(glob.glob(os.path.join(DOCUMENTS_DIR, f"*{ext}")))
+            # Consider adding case-insensitivity for non-Windows systems if necessary,
+            # though glob might handle it depending on OS. Forcing lower/upper can be more robust.
+            all_files.extend(glob.glob(os.path.join(DOCUMENTS_DIR, f"*{ext.upper()}")))
+
+
+    # Filter for actual files and get unique basenames
+    document_basenames = sorted(list(set([os.path.basename(f) for f in all_files if os.path.isfile(f)])))
+    print(f"DEBUG: Found documents in {DOCUMENTS_DIR}: {document_basenames}")
+    return document_basenames
 
 def resync_knowledge_base(embeddings_model):
     """Rebuilds the entire knowledge base by processing all documents in the documents directory."""
@@ -152,18 +214,27 @@ def resync_knowledge_base(embeddings_model):
     import glob
     os.makedirs(VECTOR_STORE_DIR, exist_ok=True)
     
-    # Get all PDF files in the documents directory
-    all_document_paths = glob.glob(os.path.join(DOCUMENTS_DIR, "*.pdf"))
+    # Get all supported document files in the documents directory (text-based for processing)
+    supported_extensions_for_processing = [".pdf", ".docx", ".xlsx", ".csv"]
+    all_document_paths = []
+    if os.path.exists(DOCUMENTS_DIR):
+        for ext in supported_extensions_for_processing:
+            all_document_paths.extend(glob.glob(os.path.join(DOCUMENTS_DIR, f"*{ext}")))
+            all_document_paths.extend(glob.glob(os.path.join(DOCUMENTS_DIR, f"*{ext.upper()}")))
     
+    # Filter for actual files and get unique paths
+    all_document_paths = sorted(list(set([f for f in all_document_paths if os.path.isfile(f)])))
+
+
     if not all_document_paths:
-        st.sidebar.warning("No documents found to sync in the knowledge base.")
+        st.sidebar.warning("No supported text-based documents found to sync in the knowledge base.")
         return None
     
     st.sidebar.info(f"Syncing knowledge base with {len(all_document_paths)} documents...")
     print(f"DEBUG: Rebuilding vector store with {len(all_document_paths)} documents")
     
     # Process all documents at once
-    all_document_chunks = _load_and_split_pdfs(all_document_paths)
+    all_document_chunks = _load_and_split_documents(all_document_paths)
     
     if not all_document_chunks:
         st.sidebar.error("Failed to process documents. No chunks created. Knowledge base not updated.")
@@ -195,9 +266,17 @@ def remove_document_from_kb(document_name, vector_store, embeddings_model):
         st.sidebar.error(f"Document '{document_name}' not found.")
         return vector_store
     
-    # Get all documents except the one to remove
-    all_document_paths = glob.glob(os.path.join(DOCUMENTS_DIR, "*.pdf"))
-    remaining_documents = [doc for doc in all_document_paths if os.path.basename(doc) != document_name]
+    # Get all supported text-based documents except the one to remove
+    supported_extensions_for_processing = [".pdf", ".docx", ".xlsx", ".csv"]
+    all_document_paths_in_kb = []
+    if os.path.exists(DOCUMENTS_DIR):
+        for ext in supported_extensions_for_processing:
+            all_document_paths_in_kb.extend(glob.glob(os.path.join(DOCUMENTS_DIR, f"*{ext}")))
+            all_document_paths_in_kb.extend(glob.glob(os.path.join(DOCUMENTS_DIR, f"*{ext.upper()}")))
+    
+    all_document_paths_in_kb = sorted(list(set([f for f in all_document_paths_in_kb if os.path.isfile(f)])))
+
+    remaining_documents = [doc for doc in all_document_paths_in_kb if os.path.basename(doc) != document_name]
     
     if not remaining_documents:
         st.sidebar.warning("This is the only document in the knowledge base. Removing it will empty the KB.")
@@ -218,7 +297,7 @@ def remove_document_from_kb(document_name, vector_store, embeddings_model):
     
     # Rebuild vector store with remaining documents
     st.sidebar.info(f"Rebuilding knowledge base without '{document_name}'...")
-    all_document_chunks = _load_and_split_pdfs(remaining_documents)
+    all_document_chunks = _load_and_split_documents(remaining_documents)
     
     if not all_document_chunks:
         st.sidebar.error("Failed to process remaining documents. Knowledge base not updated.")
@@ -276,7 +355,26 @@ def add_documents_to_vector_store(uploaded_files, vector_store, embeddings_model
         return vector_store
 
     st.sidebar.info(f"Processing {saved_files_count} uploaded document(s)...")
-    new_document_chunks = _load_and_split_pdfs(doc_paths) 
+    # Filter doc_paths to only include processable document types before splitting
+    processable_doc_paths = []
+    supported_extensions_for_processing = [".pdf", ".docx", ".xlsx", ".csv"]
+    for doc_path in doc_paths:
+        _, file_ext = os.path.splitext(doc_path)
+        if file_ext.lower() in supported_extensions_for_processing:
+            processable_doc_paths.append(doc_path)
+        else:
+            st.sidebar.info(f"File {os.path.basename(doc_path)} is not a processable document type, skipping embedding.")
+            print(f"DEBUG: Skipping {os.path.basename(doc_path)} from embedding as it's not a processable document type.")
+
+
+    if not processable_doc_paths:
+        st.sidebar.warning("No processable documents were uploaded to add to the knowledge base.")
+        print("DEBUG: No processable_doc_paths in add_documents_to_vector_store")
+        # Return the original vector_store if no new docs are processable, 
+        # even if files were saved (e.g. only images uploaded)
+        return vector_store
+
+    new_document_chunks = _load_and_split_documents(processable_doc_paths)
     
     if new_document_chunks:
         try:

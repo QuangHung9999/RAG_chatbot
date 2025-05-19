@@ -51,17 +51,11 @@ def _load_and_split_documents(doc_paths):
     print(f"DEBUG: _load_and_split_documents called with {len(doc_paths)} paths")
     
     # Define supported document extensions and their loaders
-    # Images are listed but will be skipped for now in text processing.
-    # Their handling (e.g., multimodal RAG) can be added later.
     supported_loaders = {
         ".pdf": PyPDFLoader,
         ".docx": Docx2txtLoader,
         ".xlsx": UnstructuredExcelLoader, # mode="elements" or "single" can be specified
         ".csv": CSVLoader,
-        # Image types - will be skipped for now
-        ".png": None, 
-        ".jpg": None,
-        ".jpeg": None,
     }
 
     for doc_path in doc_paths:
@@ -76,13 +70,6 @@ def _load_and_split_documents(doc_paths):
         if file_ext not in supported_loaders:
             st.sidebar.warning(f"Unsupported file type: {os.path.basename(doc_path)}. Skipping.")
             print(f"DEBUG: Unsupported file type {file_ext} for {os.path.basename(doc_path)}")
-            continue
-        
-        if supported_loaders[file_ext] is None: # Handle image types
-            st.sidebar.info(f"Image file {os.path.basename(doc_path)} detected. Skipping text extraction for now.")
-            print(f"DEBUG: Skipping image file {os.path.basename(doc_path)} for text extraction.")
-            # Placeholder for image handling:
-            # For example, could store image paths or use a multimodal model
             continue
 
         try:
@@ -189,16 +176,14 @@ def get_all_document_names():
     """Returns a list of all supported document names in the documents directory."""
     import glob
     
-    # Define supported extensions for listing (includes images)
-    supported_extensions_for_listing = [".pdf", ".docx", ".xlsx", ".csv", ".png", ".jpg", ".jpeg"]
+    # Define supported extensions for listing
+    supported_extensions_for_listing = [".pdf", ".docx", ".xlsx", ".csv"]
     all_files = []
     if os.path.exists(DOCUMENTS_DIR):
         for ext in supported_extensions_for_listing:
             all_files.extend(glob.glob(os.path.join(DOCUMENTS_DIR, f"*{ext}")))
-            # Consider adding case-insensitivity for non-Windows systems if necessary,
-            # though glob might handle it depending on OS. Forcing lower/upper can be more robust.
+            # Consider adding case-insensitivity for non-Windows systems if necessary
             all_files.extend(glob.glob(os.path.join(DOCUMENTS_DIR, f"*{ext.upper()}")))
-
 
     # Filter for actual files and get unique basenames
     document_basenames = sorted(list(set([os.path.basename(f) for f in all_files if os.path.isfile(f)])))

@@ -20,7 +20,7 @@ or
 
 `pip install -r requirements.txt --no-cache-dir`
 
-`streamlit run app.py`
+`streamlit run runner.py`
 
 ```
 project_root/  # This is "python_ai_chat" directory
